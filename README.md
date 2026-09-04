@@ -1,13 +1,43 @@
 # career-ops studio
 
-A desktop-style shell around the [career-ops](https://github.com/career-ops-hq/career-ops)
-job-search system. career-ops is terminal-first; this puts the whole thing in one
-window — the workspace UI, a job browser, and a real terminal you can hide.
+**A desktop app for your job search — the whole [career-ops](https://github.com/career-ops-hq/career-ops) pipeline in one window, no terminal required.**
+
+[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
+[![Node](https://img.shields.io/badge/node-%E2%89%A522-brightgreen.svg)](https://nodejs.org)
+[![Platform](https://img.shields.io/badge/platform-macOS%20%7C%20Linux-lightgrey.svg)](#)
+[![Built on career-ops](https://img.shields.io/badge/built%20on-career--ops-orange.svg)](https://github.com/career-ops-hq/career-ops)
+
+career-ops is a genuinely good AI job-search system — it scores postings against
+your CV, writes tailored resumes that can't invent facts, drafts cover letters,
+and tracks every application. It is also terminal-first, which puts a lot of
+people off before they ever see what it does.
+
+**This is the front end it was missing.** One window: the workspace UI, a job
+browser pinned beside it, and a real terminal you can hide with a keystroke.
+Everything career-ops does, without living in a shell.
+
+```bash
+git clone https://github.com/gagan-baghel/career-ops-studio
+cd career-ops-studio && npm install
+get me hired
+```
+
+That is the whole setup. `npm install` fetches career-ops for you.
+
+---
+
+### What you get
+
+- **Score jobs against your real CV** — paste a URL, get a 1–5 fit rating with the gaps named honestly, not a hype score.
+- **Tailored CVs and cover letters as PDFs** — with a fact-checker that blocks any claim your CV doesn't support.
+- **A job browser beside your workspace** — postings open in a real window, so your existing logins just work.
+- **A built-in terminal** — real shell, your own config, hidden until you want it (`⌃\``).
+- **Your data never leaves your machine.** No account, no server, no telemetry. Everything is local files you own.
 
 ## Install
 
 ```bash
-git clone <this-repo> career-ops-studio
+git clone https://github.com/gagan-baghel/career-ops-studio
 cd career-ops-studio && npm install
 ```
 
