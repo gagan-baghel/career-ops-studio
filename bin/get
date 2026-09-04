@@ -1,0 +1,94 @@
+#!/bin/bash
+# get me hired — start career-ops studio.
+# get me fired — stop it again.
+set -uo pipefail
+
+# Resolve through the symlink in ~/.local/bin so the folder can move.
+TARGET="${BASH_SOURCE[0]}"
+TARGET="$(readlink -f "$TARGET" 2>/dev/null || echo "$TARGET")"
+STUDIO="$(cd "$(dirname "$TARGET")/.." && pwd)"
+
+PORT="${STUDIO_PORT:-4321}"
+WEB_PORT="${WEB_PORT:-3000}"
+URL="http://localhost:$PORT"
+LOG="$STUDIO/.studio.log"
+
+say() { printf '  %s\n' "$*"; }
+running() { curl -sf -o /dev/null --max-time 2 "$URL/api/state"; }
+
+usage() {
+  cat <<'TXT'
+
+  career-ops studio
+
+    get me hired     start the studio and open it
+    get me fired     stop it
+
+TXT
+}
+
+# Node >= 22 is required by the career-ops web app.
+ensure_node() {
+  node -e 'process.exit(+process.versions.node.split(".")[0] >= 22 ? 0 : 1)' 2>/dev/null && return 0
+  export NVM_DIR="${NVM_DIR:-$HOME/.nvm}"
+  # shellcheck disable=SC1091
+  [ -s "$NVM_DIR/nvm.sh" ] && . "$NVM_DIR/nvm.sh" && nvm use 22 >/dev/null 2>&1
+  node -e 'process.exit(+process.versions.node.split(".")[0] >= 22 ? 0 : 1)' 2>/dev/null
+}
+
+start() {
+  if running; then
+    say "Already running — opening $URL"
+    open "$URL"
+    return 0
+  fi
+
+  if ! ensure_node; then
+    say "Needs Node 22 or newer (found: $(node -v 2>/dev/null || echo none))."
+    say "Install it with:  nvm install 22"
+    return 1
+  fi
+
+  [ -d "$STUDIO/node_modules" ] || (cd "$STUDIO" && npm install >/dev/null)
+
+  say "Starting career-ops studio…"
+  # Backgrounded with disown rather than nohup. nohup detaches the process from
+  # the login session, and a headed Chrome launched from there dies instantly
+  # ("Target page, context or browser has been closed") — which silently broke
+  # the Apply flow, since it drives a real Chrome window. disown keeps the GUI
+  # session and still survives the terminal closing.
+  cd "$STUDIO" || return 1
+  node server.mjs >"$LOG" 2>&1 &
+  disown
+
+  for _ in $(seq 1 40); do
+    running && break
+    sleep 0.5
+  done
+
+  if running; then
+    say "Ready → $URL"
+    say "Log: $LOG"
+  else
+    say "Did not come up. Last lines of $LOG:"
+    tail -5 "$LOG" 2>/dev/null | sed 's/^/    /'
+    return 1
+  fi
+}
+
+stop() {
+  local pids
+  pids="$(lsof -ti :"$PORT" -ti :"$WEB_PORT" 2>/dev/null | sort -u)"
+  if [ -z "$pids" ]; then
+    say "Not running."
+    return 0
+  fi
+  echo "$pids" | xargs kill 2>/dev/null
+  say "Stopped."
+}
+
+case "$*" in
+  "me hired") start ;;
+  "me fired") stop ;;
+  *) usage ;;
+esac

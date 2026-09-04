@@ -1,0 +1,24 @@
+# ── Studio ────────────────────────────────────────────────────────────────
+node_modules/
+.studio.log
+.DS_Store
+
+# Terminal shim runtime state. .zsh_history accumulates whatever you type in
+# the studio's terminal tabs; .zcompdump is a generated completion cache.
+# The dotfiles themselves (.zshrc, .zshenv, .zprofile, .zlogin) ARE tracked —
+# they are the shim.
+shell/.zsh_history
+shell/.zcompdump*
+
+# ── The career-ops workspace ──────────────────────────────────────────────
+# NOT part of this repository. `npm install` clones it here (see
+# scripts/bootstrap.mjs) and it stays gitignored forever.
+#
+# This is deliberate and load-bearing, for two reasons:
+#   1. career-ops is upstream's project (MIT, github.com/career-ops-hq/career-ops).
+#      This repo ships the studio, not a copy of his code.
+#   2. Once installed, this directory holds YOUR job search — cv.md,
+#      config/profile.yml, data/, reports/, output/, jds/, documents/,
+#      interview-prep/. Ignoring the whole tree means none of it can ever be
+#      committed by accident, no matter what lands inside it.
+career-ops/
