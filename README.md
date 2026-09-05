@@ -24,6 +24,8 @@ get me hired
 
 That is the whole setup. `npm install` fetches career-ops for you.
 
+![career-ops studio — the workspace, with scored roles awaiting a decision](public/screenshots/01-workspace.png)
+
 ---
 
 ### What you get
