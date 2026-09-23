@@ -1,8 +1,4 @@
 import { spawn } from "node:child_process";
-
-// How long a discovery scan may run before we stop it. The API route's own
-// maxDuration is 300s, so this stays just under it.
-const SCAN_TIMEOUT_MS = 280_000;
 import fs from "node:fs";
 import { careerOpsRoot, rootScript } from "@/lib/career-ops";
 import { writeTempPortals, cleanupTempPortals } from "./portals";
@@ -13,56 +9,28 @@ export { ATS_SOURCES } from "@/lib/explore";
 
 /**
  * ACL for the discovery engine — orchestrates the REAL core scanner
- * `scan-ats-full.mjs` (reverse ATS discovery, a contract entry-point). We run it
- * with `--dry-run` so it writes NOTHING (the user reviews + chooses), point it at
- * an EPHEMERAL filter file (never the user's portals.yml), and surface its results.
+ * `scan-ats-full.mjs` (reverse ATS discovery) with `--dry-run --json`, so it
+ * writes NOTHING and hands back one authoritative result object. It runs against
+ * an EPHEMERAL filter file (never the user's portals.yml). Zero LLM tokens.
  *
- * DISCOVERY IS FREE — zero LLM tokens (pure HTTP + JSON). Only evaluation costs
- * tokens, and that is triggered explicitly elsewhere.
+ * Why one scanner process PER SOURCE, in parallel, each with a time budget:
+ * a --json run only writes its result at the very end, so one slow source used
+ * to sink them all. Workday is that source — a single large tenant can hold
+ * the engine's 5-minute per-company watchdog, and our kill then threw away
+ * Greenhouse/Lever/Ashby matches that were already found. Now each source
+ * reports as soon as it is done, and CAREER_OPS_SCAN_BUDGET_MS makes the engine
+ * stop on time and still return what it found (flagged `budgetHit`).
  *
- * Two parse paths, chosen by probing the local scanner's source:
- *  • `--json` (#1199): stdout = ONE authoritative object (human progress → stderr),
- *    carrying capHit / datasetStatus / postingsDroppedNoDate so we can tell a
- *    DEGRADED scan (capped, stale/unreachable dataset, postings dropped for no date)
- *    from a genuinely EMPTY one. Preferred.
- *  • legacy: older local checkouts lack `--json`; we parse the human stdout text
- *    (convenient but not formally stable) and infer a looser summary.
+ * `--shuffle`: `--limit N` without it takes the FIRST N companies of each
+ * alphabetical directory, so every scan searched the same "A…" employers.
  */
 
-const OFFER_RE = /^\s*\+\s+\[([^\]]+)\]\s+(\S+)\s+\|\s+(.+)$/;
-const ATS_START_RE = /⚙\s+(\S+)\s+—\s+(\d+)\s+companies/;
-const PROGRESS_RE = /(\d+)\/(\d+)\s+scanned,\s+(\d+)\s+total matches/;
-const ATS_DONE_RE = /done \((\d+) unreachable boards skipped\)/;
-const COMPANIES_RE = /Companies scanned:\s+(\d+)/;
-const UNREACHABLE_RE = /Unreachable boards:\s+(\d+)/;
-const SUMMARY_RE = /New matches:\s+(\d+)/;
+// The API route's maxDuration is 300s. Each source gets SOURCE_BUDGET_MS to
+// scan; the hard kill only fires if the engine overruns its own budget badly.
+const SOURCE_BUDGET_MS = 180_000;
+const HARD_KILL_MS = 280_000;
 
-function firstMatch(title: string, positives: string[]): string | undefined {
-  const lower = title.toLowerCase();
-  for (const k of positives) if (k && lower.includes(k.toLowerCase())) return k;
-  return undefined;
-}
-
-function parseOfferLine(source: string, date: string, rest: string): Omit<DiscoveredOffer, "url"> | null {
-  const fields = rest.split(" | ");
-  if (fields.length < 2) return null;
-  const company = fields[0].trim();
-  const title = fields[1].trim();
-  const location = fields.slice(2).join(" | ").trim();
-  if (!company || !title) return null;
-  return {
-    company,
-    title,
-    location: location === "N/A" ? "" : location,
-    postedAt: /^\d{4}-\d{2}-\d{2}$/.test(date) ? date : "",
-    ats: source.replace(/-full$/, ""),
-    source,
-  };
-}
-
-// Does the user's LOCAL scanner support the --json contract (#1199)? Probe the
-// source (cheap, no spawn) so older checkouts fall back instead of breaking on an
-// unknown flag — the web is local-first, so the version is whatever they installed.
+// Does the user's LOCAL scanner support the --json contract (#1199)?
 export function scannerSupportsJson(): boolean {
   try {
     const src = fs.readFileSync(rootScript("scan-ats-full"), "utf8");
@@ -72,223 +40,183 @@ export function scannerSupportsJson(): boolean {
   }
 }
 
+const ATS_START_RE = /⚙\s+(\S+)\s+—\s+(\d+)\s+companies/;
+const PROGRESS_RE = /(\d+)\/(\d+)\s+scanned,\s+(\d+)\s+total matches/;
+
+function firstMatch(title: string, positives: string[]): string | undefined {
+  const lower = title.toLowerCase();
+  for (const k of positives) if (k && lower.includes(k.toLowerCase())) return k;
+  return undefined;
+}
+
 type JsonOffer = { company?: string; title?: string; url?: string; location?: string | null; postedAt?: string | null; source?: string };
 type ScanJson = {
   companiesAvailable?: number;
   companiesScanned?: number;
   capHit?: boolean;
+  budgetHit?: boolean;
+  stoppedByOutage?: boolean;
   datasetStatus?: Record<string, "ok" | "stale" | "empty">;
   postingsKept?: number;
   postingsDroppedNoDate?: number;
   unreachableBoards?: number;
   offers?: JsonOffer[];
 };
+type SourceResult = { ats: string; json: ScanJson | null; timedOut: boolean; stderrTail: string };
 
-export function runDiscovery(filters: ExploreFilters, onEvent: (e: ScanEvent) => void): Promise<DiscoveredOffer[]> {
+function scanSource(ats: string, filters: ExploreFilters, portals: string, onEvent: (e: ScanEvent) => void): Promise<SourceResult> {
   return new Promise((resolve) => {
-    const tempPortals = writeTempPortals(filters);
-    const ats = (filters.ats.length ? filters.ats : [...ATS_SOURCES]).filter((a) => (ATS_SOURCES as readonly string[]).includes(a));
-    const useJson = scannerSupportsJson();
-    const args = [
-      rootScript("scan-ats-full"),
-      "--dry-run",
-      "--since",
-      String(Math.max(1, filters.sinceDays || 7)),
-      "--ats",
-      ats.join(","),
-      "--limit",
-      String(Math.max(1, filters.limitPerAts || 150)),
-    ];
-    if (useJson) args.push("--json");
+    const child = spawn(
+      process.execPath,
+      [
+        rootScript("scan-ats-full"),
+        "--dry-run",
+        "--json",
+        "--shuffle",
+        "--since",
+        String(Math.max(1, filters.sinceDays || 7)),
+        "--ats",
+        ats,
+        "--limit",
+        String(Math.max(1, filters.limitPerAts || 150)),
+      ],
+      {
+        cwd: careerOpsRoot(),
+        env: { ...process.env, CAREER_OPS_PORTALS: portals, CAREER_OPS_SCAN_BUDGET_MS: String(SOURCE_BUDGET_MS) },
+      },
+    );
 
-    const child = spawn(process.execPath, args, {
-      cwd: careerOpsRoot(),
-      env: { ...process.env, CAREER_OPS_PORTALS: tempPortals },
-    });
-
-    const offers: DiscoveredOffer[] = [];
-    const seen = new Set<string>();
-    let currentAts: string = ats[0] || "";
-    let pending: Omit<DiscoveredOffer, "url"> | null = null;
-    let companiesScanned = 0;
-    let unreachable = 0;
-    let outBuf = "";
+    let out = "";
     let errBuf = "";
-    let jsonOut = ""; // --json mode: the single stdout object accumulates here
-
-    // Set when OUR timer kills the scan, so the close handler can say that
-    // plainly instead of reporting the empty stdout it caused.
+    let errTail = "";
+    let finished = false;
     let timedOut = false;
-    const killer = setTimeout(() => {
-      timedOut = true;
+    const finish = (json: ScanJson | null) => {
+      if (finished) return;
+      finished = true;
+      clearTimeout(killer);
+      // The result is in hand. A budget-stopped engine can still have HTTP
+      // requests in flight that keep the process alive — nothing left to wait for.
       try {
         child.kill("SIGTERM");
       } catch {
-        /* ignore */
+        /* already gone */
       }
-    }, SCAN_TIMEOUT_MS);
-
-    // Live progress (atsStart / progress / atsDone) — in --json mode these human
-    // lines arrive on STDERR; in legacy mode on STDOUT (handled inside handleLine).
-    const handleProgressLine = (line: string) => {
-      const atsM = line.match(ATS_START_RE);
-      if (atsM) {
-        currentAts = atsM[1];
-        onEvent({ kind: "atsStart", ats: atsM[1], companies: Number(atsM[2]) });
-        return;
-      }
-      const progM = line.match(PROGRESS_RE);
-      if (progM) {
-        onEvent({ kind: "progress", ats: currentAts, scanned: Number(progM[1]), total: Number(progM[2]), matches: Number(progM[3]) });
-        return;
-      }
-      const doneAtsM = line.match(ATS_DONE_RE);
-      if (doneAtsM) {
-        onEvent({ kind: "atsDone", ats: currentAts, unreachable: Number(doneAtsM[1]) });
-      }
+      resolve({ ats, json, timedOut, stderrTail: errTail });
     };
+    const killer = setTimeout(() => {
+      timedOut = true;
+      finish(null);
+    }, HARD_KILL_MS);
 
-    const handleLine = (line: string) => {
-      const trimmed = line.trim();
-      if (pending && /^https?:\/\//i.test(trimmed)) {
-        const url = trimmed.split(/\s+/)[0];
-        if (!seen.has(url)) {
+    child.stdout.on("data", (d: Buffer) => {
+      out += d.toString();
+      // The engine writes its single result object followed by a newline.
+      if (!out.endsWith("\n")) return;
+      try {
+        finish(JSON.parse(out) as ScanJson);
+      } catch {
+        /* partial chunk — wait for more */
+      }
+    });
+    // Human progress lives on stderr in --json mode.
+    child.stderr.on("data", (d: Buffer) => {
+      errBuf += d.toString();
+      const parts = errBuf.split(/\r\n|\r|\n/);
+      errBuf = parts.pop() ?? "";
+      for (const p of parts) {
+        const line = p.trim();
+        if (!line) continue;
+        errTail = (errTail + "\n" + line).slice(-600);
+        const start = line.match(ATS_START_RE);
+        if (start) onEvent({ kind: "atsStart", ats, companies: Number(start[2]) });
+        const prog = line.match(PROGRESS_RE);
+        if (prog) onEvent({ kind: "progress", ats, scanned: Number(prog[1]), total: Number(prog[2]), matches: Number(prog[3]) });
+        onEvent({ kind: "log", line });
+      }
+    });
+    child.on("error", () => finish(null));
+    child.on("close", () => {
+      if (finished) return;
+      try {
+        finish(JSON.parse(out) as ScanJson);
+      } catch {
+        finish(null);
+      }
+    });
+  });
+}
+
+export async function runDiscovery(filters: ExploreFilters, onEvent: (e: ScanEvent) => void): Promise<DiscoveredOffer[]> {
+  if (!scannerSupportsJson()) {
+    onEvent({ kind: "error", message: "Your career-ops scanner is too old for Explore. Run `npm run bootstrap` in the studio folder." });
+    return [];
+  }
+  const sources = (filters.ats.length ? filters.ats : [...ATS_SOURCES]).filter((a) => (ATS_SOURCES as readonly string[]).includes(a));
+  const portals = writeTempPortals(filters);
+  const offers: DiscoveredOffer[] = [];
+  const seen = new Set<string>();
+  const total = { companiesScanned: 0, companiesAvailable: 0, unreachable: 0, dropped: 0, capHit: false, budgetHit: [] as string[] };
+  const datasetStatus: Record<string, "ok" | "stale" | "empty"> = {};
+  const failed: string[] = [];
+
+  try {
+    await Promise.all(
+      sources.map(async (ats) => {
+        const r = await scanSource(ats, filters, portals, onEvent);
+        const j = r.json;
+        if (!j || !Array.isArray(j.offers)) {
+          failed.push(ats);
+          onEvent({ kind: "atsDone", ats, unreachable: 0 });
+          return;
+        }
+        for (const o of j.offers) {
+          const url = (o.url || "").trim();
+          if (!url || seen.has(url) || !o.company || !o.title) continue;
           seen.add(url);
-          const offer: DiscoveredOffer = { ...pending, url, matchedKeyword: firstMatch(pending.title, filters.positive) };
+          const source = o.source || `${ats}-full`;
+          const offer: DiscoveredOffer = {
+            company: o.company,
+            title: o.title,
+            location: o.location || "",
+            postedAt: o.postedAt || "",
+            ats: source.replace(/-full$/, ""),
+            source,
+            url,
+            matchedKeyword: firstMatch(o.title, filters.positive),
+          };
           offers.push(offer);
           onEvent({ kind: "offer", offer });
         }
-        pending = null;
-        return;
-      }
-      if (pending) pending = null;
+        total.companiesScanned += j.companiesScanned ?? 0;
+        total.companiesAvailable += j.companiesAvailable ?? 0;
+        total.unreachable += j.unreachableBoards ?? 0;
+        total.dropped += j.postingsDroppedNoDate ?? 0;
+        total.capHit ||= Boolean(j.capHit);
+        if (j.budgetHit || j.stoppedByOutage) total.budgetHit.push(ats);
+        Object.assign(datasetStatus, j.datasetStatus ?? {});
+        onEvent({ kind: "atsDone", ats, unreachable: j.unreachableBoards ?? 0, partial: Boolean(j.budgetHit || j.stoppedByOutage) });
+      }),
+    );
+  } finally {
+    cleanupTempPortals(portals);
+  }
 
-      const offerM = line.match(OFFER_RE);
-      if (offerM) {
-        pending = parseOfferLine(offerM[1], offerM[2], offerM[3]);
-        return;
-      }
-      const atsM = line.match(ATS_START_RE);
-      if (atsM) {
-        currentAts = atsM[1];
-        onEvent({ kind: "atsStart", ats: atsM[1], companies: Number(atsM[2]) });
-        return;
-      }
-      const progM = line.match(PROGRESS_RE);
-      if (progM) {
-        onEvent({ kind: "progress", ats: currentAts, scanned: Number(progM[1]), total: Number(progM[2]), matches: Number(progM[3]) });
-        return;
-      }
-      const doneAtsM = line.match(ATS_DONE_RE);
-      if (doneAtsM) {
-        onEvent({ kind: "atsDone", ats: currentAts, unreachable: Number(doneAtsM[1]) });
-        return;
-      }
-      const compM = line.match(COMPANIES_RE);
-      if (compM) {
-        companiesScanned = Number(compM[1]);
-        return;
-      }
-      const unreachM = line.match(UNREACHABLE_RE);
-      if (unreachM) {
-        unreachable = Number(unreachM[1]);
-        return;
-      }
-      const sumM = line.match(SUMMARY_RE);
-      if (sumM) {
-        onEvent({ kind: "summary", companiesScanned, unreachable, matches: Number(sumM[1]) });
-        return;
-      }
-    };
-
-    child.stdout.on("data", (d: Buffer) => {
-      if (useJson) {
-        jsonOut += d.toString(); // one JSON object — parsed at close
-        return;
-      }
-      outBuf += d.toString();
-      const parts = outBuf.split(/\r\n|\r|\n/);
-      outBuf = parts.pop() ?? "";
-      for (const p of parts) handleLine(p);
-    });
-    child.stderr.on("data", (d: Buffer) => {
-      errBuf += d.toString();
-      const parts = errBuf.split(/\r?\n/);
-      errBuf = parts.pop() ?? "";
-      for (const p of parts) {
-        if (!p.trim()) continue;
-        if (useJson) handleProgressLine(p); // human progress lives on stderr in --json mode
-        onEvent({ kind: "log", line: p.trim() });
-      }
-    });
-
-    child.on("error", (e) => {
-      clearTimeout(killer);
-      cleanupTempPortals(tempPortals);
-      onEvent({ kind: "error", message: e instanceof Error ? e.message : "scanner failed to start" });
-      resolve(offers);
-    });
-    child.on("close", () => {
-      clearTimeout(killer);
-      cleanupTempPortals(tempPortals);
-      if (useJson) {
-        let j: ScanJson | null = null;
-        try {
-          j = JSON.parse(jsonOut.trim()) as ScanJson;
-        } catch {
-          j = null;
-        }
-        if (j && Array.isArray(j.offers)) {
-          for (const o of j.offers) {
-            const url = (o.url || "").trim();
-            if (!url || seen.has(url) || !o.company || !o.title) continue;
-            seen.add(url);
-            const source = o.source || `${currentAts}-full`;
-            const offer: DiscoveredOffer = {
-              company: o.company,
-              title: o.title,
-              location: o.location || "",
-              postedAt: o.postedAt || "",
-              ats: source.replace(/-full$/, ""),
-              source,
-              url,
-              matchedKeyword: firstMatch(o.title, filters.positive),
-            };
-            offers.push(offer);
-            onEvent({ kind: "offer", offer });
-          }
-          onEvent({
-            kind: "summary",
-            companiesScanned: j.companiesScanned ?? 0,
-            unreachable: j.unreachableBoards ?? 0,
-            matches: j.postingsKept ?? offers.length,
-            companiesAvailable: j.companiesAvailable,
-            capHit: j.capHit,
-            datasetStatus: j.datasetStatus,
-            postingsDroppedNoDate: j.postingsDroppedNoDate,
-          });
-        } else if (timedOut) {
-          // The scan was still running when we stopped it. In --json mode the
-          // single result object is only written at the very end, so a kill
-          // leaves stdout empty — reporting that as "no readable output" hid
-          // both the real cause and the fact that matches had been found.
-          // Workday is the usual reason: it alone can take several minutes.
-          onEvent({
-            kind: "error",
-            message:
-              `The scan was still running after ${Math.round(SCAN_TIMEOUT_MS / 1000)}s and was stopped, so its results were lost. ` +
-              "Turn off the slowest source (Workday) under Sources, or lower Scan depth, then try again.",
-          });
-        } else {
-          // --json requested but stdout didn't parse — surface honestly rather than
-          // silently returning 0 (defensive; shouldn't happen once the probe passed).
-          onEvent({ kind: "error", message: "The scanner returned no readable output." });
-        }
-        resolve(offers);
-        return;
-      }
-      if (outBuf.trim()) handleLine(outBuf);
-      resolve(offers);
-    });
+  onEvent({
+    kind: "summary",
+    companiesScanned: total.companiesScanned,
+    unreachable: total.unreachable,
+    matches: offers.length,
+    companiesAvailable: total.companiesAvailable,
+    capHit: total.capHit,
+    datasetStatus,
+    postingsDroppedNoDate: total.dropped,
+    partialSources: total.budgetHit,
   });
+  if (failed.length && !offers.length) {
+    onEvent({ kind: "error", message: `The scan failed for ${failed.join(", ")}. Try again, or turn that source off under Sources.` });
+  } else if (failed.length) {
+    onEvent({ kind: "log", line: `No result from ${failed.join(", ")} — showing the other sources.` });
+  }
+  return offers;
 }

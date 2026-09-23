@@ -44,19 +44,26 @@ export function useCountUp(target: number): number {
 
 function SourceChip({ ats, s }: { ats: AtsSource; s?: SourceState }) {
   const state = s?.state ?? "queued";
-  const pct = s?.total ? Math.min(100, Math.round(((s.done ?? 0) / s.total) * 100)) : state === "swept" || state === "noisy" ? 100 : 0;
+  const finished = state === "swept" || state === "noisy" || state === "partial";
+  const pct = finished ? 100 : s?.total ? Math.min(100, Math.round(((s.done ?? 0) / s.total) * 100)) : 0;
   return (
-    <div className="co-src__chip" data-state={state === "noisy" ? "active" : state}>
+    <div className="co-src__chip" data-state={state === "noisy" || state === "partial" ? "active" : state}>
       {state === "active" ? (
         <span className="co-src__orb" />
-      ) : state === "swept" || state === "noisy" ? (
+      ) : finished ? (
         <Check className="size-3.5 text-emerald-500" />
       ) : (
         <span className="size-2.5 rounded-full border border-current opacity-40" />
       )}
       <span className="text-[13px] font-medium text-foreground">{ATS_LABEL[ats]}</span>
       <div className="ml-auto flex flex-col items-end gap-1">
-        {state === "noisy" && <span className="text-[10px] text-faint">~{s?.unreachable} skipped</span>}
+        {state === "partial" ? (
+          <span className="text-[10px] text-faint">time limit</span>
+        ) : state === "noisy" ? (
+          <span className="text-[10px] text-faint">~{s?.unreachable} skipped</span>
+        ) : state === "active" && s?.total ? (
+          <span className="text-[10px] tabular-nums text-faint">{(s.done ?? 0).toLocaleString()}/{s.total.toLocaleString()}</span>
+        ) : null}
         <div className="co-src__track">
           <div className="co-src__bar" style={{ width: `${pct}%` }} />
         </div>
