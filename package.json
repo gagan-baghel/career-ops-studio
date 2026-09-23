@@ -1,13 +1,15 @@
 {
   "name": "career-ops-studio",
-  "version": "1.0.0",
-  "description": "Desktop shell for career-ops — workspace, job browser and terminal in one window. Installs the career-ops workspace it runs on.",
+  "version": "1.1.0",
+  "description": "Desktop shell for career-ops — workspace, job browser and terminal in one window. Installs the career-ops workspace it runs on, pinned to a tested upstream revision.",
   "main": "server.mjs",
   "scripts": {
     "start": "node server.mjs",
     "bootstrap": "node scripts/bootstrap.mjs",
     "overlay": "node scripts/bootstrap.mjs",
-    "postinstall": "node scripts/bootstrap.mjs"
+    "postinstall": "node scripts/bootstrap.mjs",
+    "sync-upstream": "node scripts/sync-upstream.mjs",
+    "test": "node --test test/*.test.mjs"
   },
   "dependencies": {
     "@xterm/addon-fit": "^0.11.0",

@@ -8,7 +8,7 @@
 import http from 'node:http';
 import { spawn } from 'node:child_process';
 import { readFile, stat } from 'node:fs/promises';
-import { createReadStream } from 'node:fs';
+import { createReadStream, existsSync } from 'node:fs';
 import { dirname, join, normalize, extname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { WebSocketServer } from 'ws';
@@ -58,19 +58,29 @@ const probe = () =>
   });
 
 async function startWeb() {
+  web.state = 'starting';
   if (await probe()) {
     web.state = 'ready';
     note(`Attached to a career-ops web server already running on ${WEB_URL}`);
     return;
   }
+  if (!existsSync(join(ROOT, 'web', 'node_modules', 'next', 'package.json'))) {
+    web.state = 'down';
+    note(`The career-ops workspace is not installed (or its install is broken).\nRun \`npm run bootstrap\` in ${HERE}, then press Retry.\n`);
+    return;
+  }
   note(`Starting career-ops web (${join(ROOT, 'web')})…`);
-  web.child = spawn('npm', ['run', 'dev'], {
+  // detached = own process group, so stopWeb can take down npm *and* next dev.
+  const child = (web.child = spawn('npm', ['run', 'dev'], {
     cwd: join(ROOT, 'web'),
     env: { ...CHILD_ENV, PORT: String(WEB_PORT) },
-  });
-  web.child.stdout.on('data', (b) => note(b.toString()));
-  web.child.stderr.on('data', (b) => note(b.toString()));
-  web.child.on('exit', (code) => {
+    detached: true,
+  }));
+  child.stdout.on('data', (b) => note(b.toString()));
+  child.stderr.on('data', (b) => note(b.toString()));
+  child.on('exit', (code) => {
+    if (web.child !== child) return;
+    web.child = null;
     web.state = 'down';
     note(`career-ops web exited (code ${code}).`);
   });
@@ -87,6 +97,19 @@ async function startWeb() {
   web.state = 'down';
   note('Timed out waiting for the career-ops web server.');
 }
+
+const stopWeb = () =>
+  new Promise((ok) => {
+    const c = web.child;
+    if (!c) return ok();
+    web.child = null;
+    c.once('exit', ok);
+    try {
+      process.kill(-c.pid);
+    } catch {
+      ok();
+    }
+  });
 
 // ── static assets ──────────────────────────────────────────────────────────
 const MIME = {
@@ -140,8 +163,24 @@ async function portals() {
   return [];
 }
 
+// ── who may talk to us ─────────────────────────────────────────────────────
+// Binding to 127.0.0.1 is not enough: any web page the user has open can still
+// aim a request or a WebSocket at localhost, and /pty is a real shell. Require
+// our own Host (defeats DNS rebinding) and, when a browser sends one, our own
+// Origin (defeats cross-site pages). Non-browser local clients send no Origin.
+const OURS = new Set([`localhost:${PORT}`, `127.0.0.1:${PORT}`]);
+const trusted = (req) => {
+  if (!OURS.has(req.headers.host)) return false;
+  const origin = req.headers.origin;
+  return !origin || OURS.has(origin.replace(/^http:\/\//, ''));
+};
+
 // ── http ───────────────────────────────────────────────────────────────────
 const server = http.createServer(async (req, res) => {
+  if (!trusted(req)) {
+    res.writeHead(403, { 'content-type': 'text/plain' }).end('forbidden');
+    return;
+  }
   const url = new URL(req.url, `http://127.0.0.1:${PORT}`);
   const path = url.pathname;
 
@@ -153,6 +192,14 @@ const server = http.createServer(async (req, res) => {
         root: ROOT,
       }),
     );
+    return;
+  }
+  if (path === '/api/restart' && req.method === 'POST') {
+    if (web.state !== 'starting') {
+      web.state = 'starting';
+      stopWeb().then(startWeb);
+    }
+    res.writeHead(204).end();
     return;
   }
   if (path === '/api/log') {
@@ -178,7 +225,7 @@ const server = http.createServer(async (req, res) => {
 // Text frames are control JSON; binary frames are raw keystrokes. Keeping them
 // on separate frame types means no escaping and no way for typed text to be
 // mistaken for a command.
-const wss = new WebSocketServer({ server, path: '/pty' });
+const wss = new WebSocketServer({ server, path: '/pty', verifyClient: ({ req }) => trusted(req) });
 
 wss.on('connection', (ws, req) => {
   const params = new URL(req.url, 'http://x').searchParams;
@@ -231,9 +278,6 @@ server.listen(PORT, '127.0.0.1', async () => {
   startWeb();
 });
 
-const shutdown = () => {
-  web.child?.kill();
-  process.exit(0);
-};
+const shutdown = () => stopWeb().then(() => process.exit(0));
 process.on('SIGINT', shutdown);
 process.on('SIGTERM', shutdown);

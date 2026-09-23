@@ -74,10 +74,13 @@
         const frame = $('app-frame');
         if (!frame.src) frame.src = webUrl;
         $('app-overlay').hidden = true;
+        setTimeout(pollState, 3000);
         return;
       }
       if (s.web === 'down') {
-        window.Buddy?.event('The workspace server stopped. Check the log.');
+        if ($('status-text').textContent !== 'server stopped') {
+          window.Buddy?.event('The workspace server stopped. Check the log.');
+        }
         setStatus('down', 'server stopped');
         $('app-overlay').hidden = false;
         $('app-overlay').querySelector('.spinner').style.display = 'none';
@@ -87,6 +90,9 @@
         $('btn-retry').hidden = false;
       } else {
         setStatus('starting', 'starting…');
+        $('app-overlay').hidden = false;
+        $('app-overlay').querySelector('.spinner').style.display = '';
+        $('btn-retry').hidden = true;
       }
       $('boot-log').textContent = (await (await fetch('/api/log')).text()).trim().split('\n').slice(-14).join('\n');
       $('boot-log').scrollTop = $('boot-log').scrollHeight;
@@ -96,7 +102,11 @@
       setTimeout(pollState, 2000);
     }
   }
-  $('btn-retry').onclick = () => location.reload();
+  $('btn-retry').onclick = async () => {
+    $('btn-retry').hidden = true;
+    await fetch('/api/restart', { method: 'POST' }).catch(() => {});
+    $('app-frame').removeAttribute('src');
+  };
   pollState();
 
   /* ── terminal drawer ────────────────────────────────────────────────── */

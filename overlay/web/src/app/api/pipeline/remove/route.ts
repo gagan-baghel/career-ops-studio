@@ -2,6 +2,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { careerOpsRoot } from "@/lib/career-ops";
 import { atomicWriteWithBackup } from "@/lib/core/safe-write";
+import { withPipelineFileLock } from "@/lib/core/liveness";
 
 // Remove postings from data/pipeline.md for real. Skipping used to only add the
 // URL to a browser-local "hidden" list, so the file — and the inbox count — kept
@@ -34,21 +35,23 @@ export async function POST(req: Request) {
   const p = file();
   if (!fs.existsSync(p)) return Response.json({ error: "no pipeline file" }, { status: 404 });
 
-  const src = fs.readFileSync(p, "utf8");
-  const removed: string[] = [];
-  const kept = src.split("\n").filter((line) => {
-    const u = urlOf(line);
-    if (u && urls.has(u)) {
-      removed.push(line);
-      return false;
-    }
-    return true;
-  });
-
-  if (removed.length === 0) return Response.json({ ok: true, removed: [], count: 0 });
-
+  // Under the core's pipeline lock, reading inside it, so a scan appending
+  // between our read and our write cannot lose its new postings.
+  let removed: string[] = [];
   try {
-    atomicWriteWithBackup(p, kept.join("\n"));
+    removed = await withPipelineFileLock(p, async () => {
+      const gone: string[] = [];
+      const kept = fs.readFileSync(p, "utf8").split("\n").filter((line) => {
+        const u = urlOf(line);
+        if (u && urls.has(u)) {
+          gone.push(line);
+          return false;
+        }
+        return true;
+      });
+      if (gone.length) atomicWriteWithBackup(p, kept.join("\n"));
+      return gone;
+    });
   } catch (e) {
     return Response.json({ error: e instanceof Error ? e.message : "write failed" }, { status: 500 });
   }
@@ -67,16 +70,23 @@ export async function PUT(req: Request) {
   if (lines.length === 0) return Response.json({ error: "no lines" }, { status: 400 });
 
   const p = file();
-  const src = fs.existsSync(p) ? fs.readFileSync(p, "utf8") : "# Pipeline — Pending URLs\n\n## Pending\n";
-  const have = new Set(src.split("\n").map(urlOf).filter(Boolean) as string[]);
-  const add = lines.filter((l) => !have.has(urlOf(l)!));
-  if (add.length === 0) return Response.json({ ok: true, restored: 0 });
-
-  const out = src.replace(/\s*$/, "") + "\n" + add.join("\n") + "\n";
   try {
-    atomicWriteWithBackup(p, out);
+    const restored = await withPipelineFileLock(p, async () => {
+      const src = fs.existsSync(p) ? fs.readFileSync(p, "utf8") : "# Pipeline — Pending URLs\n\n## Pending\n";
+      const have = new Set(src.split("\n").map(urlOf).filter(Boolean) as string[]);
+      const add = lines.filter((l) => !have.has(urlOf(l)!));
+      if (add.length === 0) return 0;
+      // Back under "Pending" — appending to the end of the file would land
+      // under "Processed", where the CLI reads it as finished work.
+      const all = src.split("\n");
+      const proc = all.findIndex((l) => /^##\s+Processed/i.test(l));
+      if (proc >= 0) all.splice(proc, 0, ...add, "");
+      else all.push(...add);
+      atomicWriteWithBackup(p, all.join("\n").replace(/\n*$/, "\n"));
+      return add.length;
+    });
+    return Response.json({ ok: true, restored });
   } catch (e) {
     return Response.json({ error: e instanceof Error ? e.message : "write failed" }, { status: 500 });
   }
-  return Response.json({ ok: true, restored: add.length });
 }

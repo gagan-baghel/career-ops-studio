@@ -65,34 +65,47 @@ Point it at an existing checkout instead of cloning with
 
 ## What this repo does and does not contain
 
-This repo is **only the studio** — 43 files: the shell, the overlay patches, and
-the setup script. It does not contain career-ops.
+This repo is **only the studio**: the shell, the overlay, and the setup scripts.
+It does not contain career-ops.
 
 career-ops is upstream's project and stays upstream's project. It is cloned from
 its own repository at install time into `./career-ops`, which is gitignored. That
 means two things worth being explicit about:
 
 - **You are not redistributing his code.** Users get career-ops from
-  career-ops-hq, at whatever revision is current, with its own git history intact.
+  career-ops-hq, at the revision in `.upstream-ref`, as a normal git checkout.
 - **Your job search never touches this repo.** Once installed, `career-ops/`
   holds your `cv.md`, `config/profile.yml`, `data/`, `reports/`, `output/` and
   `jds/`. The whole directory is ignored, so none of it can be committed by
   accident.
 
-If upstream ever moves a file the overlay patches, put a known-good tag or SHA in
-a `.upstream-ref` file at the repo root and `npm install` will check that out
-instead of the tip.
+## Updating
 
-## Updating career-ops
-
-`career-ops/` is a normal git clone, so:
+The overlay replaces whole files, so it only matches the career-ops revision it
+was built on. That revision is pinned in `.upstream-ref`. **Don't `git pull`
+inside `career-ops/`.** Instead:
 
 ```bash
-cd career-ops && git pull && cd .. && npm run bootstrap
+git pull && npm run bootstrap
 ```
 
-`bootstrap` re-applies the overlay over the refreshed workspace. Your data is in
-the user layer, which upstream never writes to.
+`bootstrap` moves `career-ops/` to the pinned revision, reinstalls dependencies
+only if a lockfile changed, and re-applies the overlay. Your files (`cv.md`,
+`config/`, `portals.yml`, `data/`, `reports/`, `output/` …) are gitignored by
+career-ops, so the sync never touches them. A workspace from an older studio
+(a plain copy with no `.git`) is adopted in place the same way.
+
+**Moving to a newer career-ops (maintainers):**
+
+```bash
+npm run sync-upstream          # or: npm run sync-upstream -- <tag|sha>
+npm run bootstrap && (cd career-ops/web && npm test && npx tsc --noEmit)
+```
+
+`sync-upstream` commits the overlay on the pinned revision and rebases it onto
+upstream, so git merges upstream's changes into the overlaid files instead of
+overwriting them. Then it rebuilds `overlay/` and moves the pin. If upstream
+changed the same lines, it stops and tells you which files to resolve.
 
 ## What it adds
 
@@ -163,10 +176,15 @@ workspace's layout and is copied over it on every bootstrap:
 | `api/portals/route.ts` | Adds a read endpoint; raises a role cap that silently deleted roles 25+ on every save (the shipped template has 30); lets an emptied list actually clear a filter; and persists the exclusion / blocked / always-allow lists the Explore bar can express but nothing could save. |
 | `api/profile/route.ts` | Adds a read endpoint, and a free-text comp range so a unit like `18-30 LPA` survives a save (the numeric path rebuilt it as `18-30`). |
 | `filter-builder.tsx` | **Save as my defaults** in Explore's Location & scope — filters seeded *from* `portals.yml` but never flowed back, so a refinement lasted one session. |
+| `lib/core/liveness.ts` + `inbox/liveness-sweep.tsx` + `api/pipeline/liveness` | **Closed jobs leave on their own.** When the app opens, every inbox posting not checked in the last 12 h is checked, with zero tokens: the core's ATS API check (Greenhouse, Lever, Ashby, Workday), then a plain page fetch through the core's own classifier and private-network guard. Closed postings move to *Processed* in `modes/pipeline.md`'s format (`- [x] ~~URL \| Co \| Role~~ — posting expired`), with a `.bak` first, and a notice says which ones. |
+| `api/whats-new/route.ts` | **Today's "fresh matches" only shows real, open jobs.** It read `scan-history.tsv`, a log of every posting a scan ever saw. So it offered jobs you'd removed, jobs that had closed, and jobs posted months before the scan found them. Now a job must still be pending in your inbox, not seen closed, and posted in the last 30 days. |
+| `lib/career-ops.ts` | A struck-through `~~URL…~~` inbox row (a closed posting) is read as done, not as a live job. |
+| `api/pipeline/remove/route.ts` | Remove/undo writes hold the core's pipeline lock so they can't race a scan, and undo puts rows back under *Pending*, not *Processed*. |
+| `api/run/route.ts`, `jobs/job-store.tsx`, `run-prompts.mjs` | Scoring a posting that turns out to be closed removes it from the inbox instead of failing. |
+| `layout.tsx` | Defaults the assistant to local Claude Code. |
 
-After updating career-ops itself, run `npm run overlay` to re-apply them — an
-upstream update can overwrite these files, since they are system-layer under
-career-ops' own data contract.
+These are whole files, rebuilt by `npm run sync-upstream` whenever the pin moves.
+Never edit them inside `career-ops/`: the next bootstrap puts the overlay back.
 
 ## Configuration
 
@@ -188,6 +206,11 @@ career-ops' own data contract.
 - Pop-ups must be allowed for `localhost` (they are by default for a real click;
   the pane tells you if the browser blocked one).
 - Requires Node ≥ 22 (inherited from `career-ops/web`).
+- The on-open closed-job check has no browser, so a careers page that only
+  renders with JavaScript can't be confirmed closed. It stays in the inbox until
+  you check it, or run `node check-liveness.mjs --file …` in the terminal.
+- The terminal socket only accepts the studio's own page (Host and Origin are
+  checked), because it is a real shell on your Mac.
 
 ## Credits and licence
 

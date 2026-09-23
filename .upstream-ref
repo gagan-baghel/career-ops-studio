@@ -1,0 +1,3 @@
+# career-ops revision the overlay is built and tested on. `npm run sync-upstream`
+# moves it forward (maintainers); `npm run bootstrap` installs exactly this.
+2dd0148ad7a7e4f5ab0e9907f6b383ffc602d45a

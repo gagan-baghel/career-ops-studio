@@ -7,11 +7,13 @@
 // first install and gitignored. This repo ships only the studio: the shell, the
 // overlay patches, and this script.
 //
-// Everything here is idempotent: it skips what already exists, so re-running it
-// after a `git pull` in either repo just re-applies the overlay.
+// Everything here is idempotent: re-running it after a `git pull` of this repo
+// moves the workspace to the new pin, reinstalls what changed, and re-applies
+// the overlay. Your own files are never touched.
 
+import { createHash } from 'node:crypto';
 import { spawnSync } from 'node:child_process';
-import { existsSync, readFileSync } from 'node:fs';
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { cp, mkdir, readdir, stat } from 'node:fs/promises';
 import { dirname, join, relative, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -19,12 +21,13 @@ import { fileURLToPath } from 'node:url';
 const HERE = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const ROOT = resolve(process.env.CAREER_OPS_ROOT ?? join(HERE, 'career-ops'));
 const REPO = process.env.CAREER_OPS_REPO ?? 'https://github.com/career-ops-hq/career-ops.git';
-// Optional pin. The overlay patches 24 specific files; if upstream moves them,
-// the overlay silently stops matching. Put a tag/branch/SHA in .upstream-ref to
-// hold a known-good revision. Absent (the default) tracks upstream's tip.
-const PIN = existsSync(join(HERE, '.upstream-ref'))
-  ? readFileSync(join(HERE, '.upstream-ref'), 'utf8').split('\n').find((l) => l.trim() && !l.startsWith('#'))?.trim()
-  : null;
+// The career-ops revision the overlay was built and tested on. The overlay
+// replaces whole files, so running it over any other revision would silently
+// undo upstream's changes to those files. `npm run sync-upstream` moves it.
+const PIN = readFileSync(join(HERE, '.upstream-ref'), 'utf8')
+  .split('\n')
+  .map((l) => l.trim())
+  .find((l) => l && !l.startsWith('#'));
 const OVERLAY = join(HERE, 'overlay');
 
 const say = (msg) => console.log(`  ${msg}`);
@@ -46,6 +49,40 @@ function fixPtyHelper() {
   spawnSync('/bin/sh', ['-c', `chmod +x "${dir}"/*/spawn-helper 2>/dev/null || true`]);
 }
 
+const git = (args) => spawnSync('git', args, { cwd: ROOT, encoding: 'utf8' });
+
+// Put the workspace's SYSTEM files at exactly PIN. Your job search — cv.md,
+// config/profile.yml, portals.yml, data/, reports/, output/ … — is gitignored
+// by career-ops, and a reset never touches ignored or untracked files. A
+// workspace installed by an older studio (a plain copy, no .git) is adopted
+// in place the same way.
+function syncWorkspace() {
+  if (!existsSync(join(ROOT, '.git'))) {
+    say(existsSync(ROOT) ? `Adopting the existing workspace at ${ROOT} into git` : `Installing career-ops → ${ROOT}`);
+    mkdirSync(ROOT, { recursive: true });
+    run('git', ['init', '--quiet'], ROOT);
+    run('git', ['remote', 'add', 'origin', REPO], ROOT);
+  }
+  if (git(['rev-parse', 'HEAD']).stdout.trim() === PIN) return;
+  say(`Syncing career-ops to ${PIN.slice(0, 7)}…`);
+  run('git', ['fetch', '--quiet', '--depth', '1', 'origin', PIN], ROOT);
+  run('git', ['reset', '--quiet', '--hard', 'FETCH_HEAD'], ROOT);
+}
+
+// Reinstall only when the lockfile (or manifest) changed since the last install.
+function installDeps(dir, label, args) {
+  // Hashed again after the install: `npm install` may write the lockfile.
+  const hash = () =>
+    createHash('sha256')
+      .update(['package.json', 'package-lock.json'].map((f) => (existsSync(join(dir, f)) ? readFileSync(join(dir, f)) : '')).join('\0'))
+      .digest('hex');
+  const stamp = join(dir, 'node_modules', '.studio-install');
+  if (existsSync(stamp) && readFileSync(stamp, 'utf8') === hash()) return;
+  say(`Installing ${label} dependencies…`);
+  run('npm', args, dir);
+  writeFileSync(stamp, hash());
+}
+
 // Copy every file under overlay/ onto the workspace, preserving structure.
 async function applyOverlay() {
   if (!existsSync(OVERLAY)) return;
@@ -65,7 +102,7 @@ async function applyOverlay() {
     await mkdir(dirname(dest), { recursive: true });
     await cp(file, dest);
   }
-  say(`Applied ${files.length} studio patch${files.length === 1 ? '' : 'es'} over the workspace.`);
+  say(`Applied ${files.length} studio file${files.length === 1 ? '' : 's'} over career-ops ${PIN.slice(0, 7)}.`);
 }
 
 async function main() {
@@ -75,27 +112,11 @@ async function main() {
   const major = Number(process.versions.node.split('.')[0]);
   if (major < 22) fail(`Node ${process.versions.node} is too old — career-ops/web needs Node 22+.`);
 
-  if (!existsSync(ROOT)) {
-    say(`Cloning career-ops → ${ROOT}`);
-    run('git', PIN ? ['clone', '--quiet', REPO, ROOT] : ['clone', '--quiet', '--depth', '1', REPO, ROOT], HERE);
-    if (PIN) {
-      say(`Checking out pinned revision ${PIN}`);
-      run('git', ['checkout', '--quiet', PIN], ROOT);
-    }
-  } else {
-    say(`Using the career-ops workspace at ${ROOT}`);
-  }
-
-  if (!existsSync(join(ROOT, 'node_modules'))) {
-    say('Installing career-ops dependencies (this also fetches Playwright chromium)…');
-    run('npm', ['install'], ROOT);
-  }
-
+  if (!PIN) fail('.upstream-ref has no revision in it.');
+  syncWorkspace();
+  installDeps(ROOT, 'career-ops', ['install', '--no-audit', '--no-fund']);
   const web = join(ROOT, 'web');
-  if (!existsSync(join(web, 'node_modules'))) {
-    say('Installing career-ops web dependencies…');
-    run('npm', [existsSync(join(web, 'package-lock.json')) ? 'ci' : 'install'], web);
-  }
+  installDeps(web, 'career-ops web', [existsSync(join(web, 'package-lock.json')) ? 'ci' : 'install', '--no-audit', '--no-fund']);
 
   await applyOverlay();
 
