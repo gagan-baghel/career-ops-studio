@@ -195,7 +195,7 @@ Never edit them inside `career-ops/`: the next bootstrap puts the overlay back.
 | --- | --- |
 | `CAREER_OPS_ROOT` | `./career-ops` |
 | `STUDIO_PORT` | `4321` |
-| `WEB_PORT` | `3000` |
+| `WEB_PORT` | `3000` — if another app already holds it, the workspace moves to the next free port. Set it to pin a port (a conflict is then reported, not worked around). |
 | `STUDIO_NO_OPEN` | unset — set it to skip auto-opening the browser |
 | `STUDIO_SKIP_BOOTSTRAP` | set it to make `npm install` skip the workspace setup |
 

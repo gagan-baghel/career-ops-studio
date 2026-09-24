@@ -12,11 +12,12 @@
   // ── the character ────────────────────────────────────────────────────────
   const el = document.createElement('div');
   el.className = 'buddy';
-  el.setAttribute('role', 'status');
-  el.setAttribute('aria-live', 'polite');
+  // The bubble is visual only; a separate live region carries just the lines
+  // worth hearing (events, commands), so idle quips never reach a screen reader.
   el.innerHTML = `
-    <div class="buddy-bubble" id="buddy-bubble" hidden><span id="buddy-text"></span></div>
-    <button class="buddy-guy" id="buddy-guy" aria-label="Assistant — click to mute its chatter" title="Click to mute">
+    <div class="buddy-bubble" id="buddy-bubble" aria-hidden="true" hidden><span id="buddy-text"></span></div>
+    <span class="sr-only" role="status" id="buddy-live"></span>
+    <button class="buddy-guy" id="buddy-guy" aria-label="Mute studio buddy">
       <svg viewBox="0 0 64 72" aria-hidden="true">
         <g class="b-all">
           <line class="b-ant" x1="32" y1="14" x2="32" y2="6"/>
@@ -42,6 +43,7 @@
   const guy = el.querySelector('#buddy-guy');
   const bubble = el.querySelector('#buddy-bubble');
   const text = el.querySelector('#buddy-text');
+  const live = el.querySelector('#buddy-live');
 
   // ── speech ───────────────────────────────────────────────────────────────
   let muted = false;
@@ -69,19 +71,28 @@
   }
 
   // priority: true jumps the queue for something the user just caused.
-  function say(line, { hold = 2600, priority = false } = {}) {
+  // idle: true keeps it out of the screen-reader live region.
+  function say(line, { hold = 2600, priority = false, idle = false } = {}) {
     if (muted || !line || line === lastLine) return;
     lastLine = line;
+    if (!idle) live.textContent = line;
     if (priority) queue = [{ line, hold }];
     else if (queue.length > 3) return; // never let chatter pile up
     else queue.push({ line, hold });
     drain();
   }
 
+  // Constant label + aria-pressed: the pressed state already says "muted".
+  const syncMute = () => {
+    guy.setAttribute('aria-pressed', String(muted));
+    guy.title = muted ? 'Click to unmute' : 'Click to mute';
+  };
+  syncMute();
+
   guy.onclick = () => {
     muted = !muted;
     try { localStorage.setItem('studio:buddyMuted', muted ? '1' : '0'); } catch { /* ignore */ }
-    guy.title = muted ? 'Click to unmute' : 'Click to mute';
+    syncMute();
     if (muted) { queue = []; bubble.hidden = true; showing = false; }
     else { lastLine = ''; say('Back. What are we working on?', { priority: true }); }
   };
@@ -117,9 +128,15 @@
     'Ready when you are.',
   ];
 
+  // A few idle lines, then quiet until the user does something: over hours of
+  // use, endless chatter is noise. Hidden tab = no work at all.
+  const IDLE_BUDGET = 3;
+  let idleLeft = IDLE_BUDGET;
+  const woke = () => { idleLeft = IDLE_BUDGET; };
+
   let tick = 0;
   setInterval(() => {
-    if (isBusy()) return;
+    if (document.hidden || isBusy()) return;
     tick++;
     if (pose === 'work') setPose('idle');
 
@@ -136,7 +153,10 @@
     }
 
     // Idle chatter, but sparse — roughly every fourth beat.
-    if (tick % 4 === 0) say(IDLE_CHATTER[Math.floor(Math.random() * IDLE_CHATTER.length)]);
+    if (tick % 4 === 0 && idleLeft > 0) {
+      idleLeft--;
+      say(IDLE_CHATTER[Math.floor(Math.random() * IDLE_CHATTER.length)], { idle: true });
+    }
   }, 4200);
 
   // ── what terminal output actually means ──────────────────────────────────
@@ -175,19 +195,20 @@
       // a fake percentage.
       if (sinceReport > 1200) {
         sinceReport = 0;
-        say('Claude is writing…');
+        say('Output is streaming…');
       }
     },
     // The command the user actually submitted — ground truth, no inference.
     onCommand(cmd) {
       const c = String(cmd).trim();
       if (!c) return;
+      woke();
       markBusy(4000);
       const short = c.length > 42 ? c.slice(0, 42) + '…' : c;
       say(`Running: ${short}`, { priority: true, hold: 3400 });
     },
-    onTyping() { markBusy(1200); say('You are typing. I will stay out of it.', { hold: 1800 }); },
-    event(line, opts) { markBusy(1500); say(line, { priority: true, ...opts }); },
+    onTyping() { woke(); markBusy(1200); say('You are typing. I will stay out of it.', { hold: 1800 }); },
+    event(line, opts) { woke(); markBusy(1500); say(line, { priority: true, ...opts }); },
   };
 
   say('Hey — I am your studio buddy. I will tell you what is actually happening.', { hold: 4200 });

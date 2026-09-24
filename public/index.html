@@ -1,23 +1,31 @@
 <!doctype html>
-<html lang="en" class="dark">
+<html lang="en">
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+    <meta name="description" content="Local desktop shell for career-ops: workspace, job browser and terminal in one window." />
+    <meta name="color-scheme" content="light dark" />
+    <meta name="theme-color" content="#ffffff" media="(prefers-color-scheme: light)" />
+    <meta name="theme-color" content="#161616" media="(prefers-color-scheme: dark)" />
     <title>career-ops studio</title>
     <link rel="icon" href="/icon.svg" />
+    <link rel="manifest" href="/manifest.webmanifest" />
     <link rel="stylesheet" href="/vendor/xterm.css" />
     <link rel="stylesheet" href="/app.css" />
     <script>
-      // Set the theme before first paint so the chrome never flashes.
+      // Set the theme before first paint so the chrome never flashes. A stored
+      // choice wins; otherwise follow the OS.
       (function () {
-        try {
-          var t = localStorage.getItem('studio:theme') || 'dark';
-          document.documentElement.classList.toggle('dark', t === 'dark');
-        } catch (e) {}
+        var t = null;
+        try { t = localStorage.getItem('studio:theme'); } catch (e) {}
+        var dark = t ? t === 'dark' : matchMedia('(prefers-color-scheme: dark)').matches;
+        document.documentElement.classList.toggle('dark', dark);
       })();
     </script>
   </head>
   <body>
+    <a class="skip-link" href="#main">Skip to workspace</a>
+    <noscript><p class="noscript">career-ops studio needs JavaScript to run its workspace, job browser and terminal.</p></noscript>
     <div class="app">
       <!-- ── title bar ─────────────────────────────────────────────────── -->
       <header class="titlebar">
@@ -29,21 +37,24 @@
         <nav class="segmented" role="tablist" aria-label="Workspace panes">
           <button class="seg" role="tab" data-pane="app" aria-selected="true">
             <svg viewBox="0 0 24 24" aria-hidden="true"><rect x="3" y="3" width="7" height="7" rx="1.5"/><rect x="14" y="3" width="7" height="7" rx="1.5"/><rect x="3" y="14" width="7" height="7" rx="1.5"/><rect x="14" y="14" width="7" height="7" rx="1.5"/></svg>
-            Workspace
+            <span class="seg-label">Workspace</span>
           </button>
           <button class="seg" role="tab" data-pane="browser" aria-selected="false">
             <svg viewBox="0 0 24 24" aria-hidden="true"><rect x="2.5" y="4" width="19" height="16" rx="2.5"/><path d="M12 4v16"/></svg>
-            Jobs
+            <span class="seg-label">Jobs</span>
           </button>
         </nav>
 
         <div class="tools">
-          <span class="status" id="status" title="career-ops web server">
+          <button class="status" id="status" popovertarget="sys-panel" title="System status" aria-haspopup="dialog">
             <span class="dot" data-state="starting"></span>
-            <span id="status-text">starting</span>
-          </span>
+            <span id="status-text" aria-live="polite">starting</span>
+          </button>
           <button class="icon-btn" id="btn-palette" title="Command palette — ⌘K" aria-label="Command palette">
             <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M10 4H8a4 4 0 1 0 0 8h8a4 4 0 1 1 0 8h-2"/><path d="M14 4h2a4 4 0 0 1 0 8H8a4 4 0 0 0 0 8h2"/></svg>
+          </button>
+          <button class="icon-btn" id="btn-help" title="Keyboard shortcuts — ?" aria-label="Keyboard shortcuts">
+            <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="9"/><path d="M9.5 9.2a2.6 2.6 0 0 1 5 .9c0 1.8-2.5 2.2-2.5 3.9M12 17h.01"/></svg>
           </button>
           <button class="icon-btn" id="btn-theme" title="Toggle studio theme (the workspace has its own)" aria-label="Toggle studio theme">
             <svg viewBox="0 0 24 24" aria-hidden="true" class="i-moon"><path d="M21 12.8A9 9 0 1 1 11.2 3a7 7 0 0 0 9.8 9.8Z"/></svg>
@@ -56,7 +67,7 @@
       </header>
 
       <!-- ── main ──────────────────────────────────────────────────────── -->
-      <main class="stage">
+      <main class="stage" id="main" tabindex="-1">
         <!-- workspace pane -->
         <section class="pane" id="pane-app" data-active="true">
           <iframe id="app-frame" title="career-ops workspace" allow="clipboard-write"></iframe>
@@ -65,7 +76,12 @@
               <div class="spinner" aria-hidden="true"></div>
               <h2>Starting your workspace</h2>
               <p class="muted">Booting the career-ops web server. First run takes a few seconds.</p>
-              <pre class="boot-log" id="boot-log" aria-live="polite"></pre>
+              <ol class="boot-steps" id="boot-steps" aria-label="Startup progress">
+                <li data-step="studio" data-state="done">Studio server</li>
+                <li data-step="install" data-state="active">Workspace installed</li>
+                <li data-step="web" data-state="pending">Web server</li>
+              </ol>
+              <pre class="boot-log" id="boot-log" tabindex="0" aria-label="Server boot log"></pre>
               <button class="btn ghost" id="btn-retry" hidden>Try again</button>
             </div>
           </div>
@@ -96,30 +112,53 @@
             </div>
           </div>
 
+          <div class="window-bar" id="window-state" hidden>
+            <span class="dot" data-state="ready"></span>
+            <span>Job window: <strong id="window-label"></strong></span>
+            <span class="spacer"></span>
+            <button class="btn ghost sm" id="b-focus">Bring to front</button>
+            <button class="btn ghost sm" id="b-close-win">Close</button>
+          </div>
+
           <div class="browser-body">
-            <div class="empty" id="browser-empty">
-              <div class="empty-card">
-                <h2>Open a posting beside the studio</h2>
-                <p class="muted">
-                  Job pages open in one dedicated browser window, pinned to the right of your
-                  screen — a real window, so your logins work and no site can refuse to load.
-                  Then hit <strong>Evaluate</strong>: the URL is written into your terminal
-                  ready to run. Nothing is ever submitted for you.
-                </p>
+            <div class="jobs-grid">
+              <section class="card companies" aria-labelledby="h-companies">
+                <header class="card-head">
+                  <h2 id="h-companies">Tracked companies</h2>
+                  <span class="count" id="portal-total"></span>
+                </header>
                 <label class="company-search">
                   <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="11" cy="11" r="7"/><path d="m20 20-3.5-3.5"/></svg>
-                  <input id="company-filter" type="text" autocomplete="off" spellcheck="false"
-                         placeholder="Jump to a company you track…" aria-label="Filter tracked companies" />
+                  <input id="company-filter" type="search" autocomplete="off" spellcheck="false"
+                         placeholder="Filter companies, sections, job boards…  ( / )" aria-label="Filter tracked companies" />
                 </label>
+                <div class="groups" id="group-filter" role="group" aria-label="Sections from portals.yml"></div>
                 <div class="chips" id="quick-chips"></div>
-                <p class="meta" id="portal-count"></p>
-                <div class="window-state" id="window-state" hidden>
-                  <span class="dot" data-state="ready"></span>
-                  <span id="window-label"></span>
-                  <button class="btn ghost sm" id="b-focus">Bring to front</button>
-                  <button class="btn ghost sm" id="b-close-win">Close</button>
+                <div class="card-foot">
+                  <p class="meta" id="portal-count" aria-live="polite"></p>
+                  <button class="btn ghost sm" id="b-show-all" hidden>Show all</button>
                 </div>
-              </div>
+              </section>
+
+              <aside class="side">
+                <section class="card recents" aria-labelledby="h-recents">
+                  <header class="card-head">
+                    <h2 id="h-recents">Recent postings</h2>
+                    <button class="btn ghost sm" id="b-clear-recent" hidden>Clear</button>
+                  </header>
+                  <ol class="recent-list" id="recent-list"></ol>
+                  <p class="meta recent-empty" id="recent-empty">Postings you open or evaluate show up here, so you can get back to them. Kept in this browser only.</p>
+                </section>
+
+                <section class="card how" aria-labelledby="h-how">
+                  <h2 id="h-how">How it works</h2>
+                  <ol class="steps muted">
+                    <li>Open a posting — it loads in a real window beside the studio, so your logins work.</li>
+                    <li><strong>Evaluate</strong> stages the URL in a Claude session.</li>
+                    <li>You press Enter. Nothing is ever submitted for you.</li>
+                  </ol>
+                </section>
+              </aside>
             </div>
           </div>
         </section>
@@ -127,7 +166,7 @@
 
       <!-- ── terminal drawer ───────────────────────────────────────────── -->
       <div class="drawer" id="drawer" data-open="false" style="--drawer-h: 320px">
-        <div class="resizer" id="resizer" role="separator" aria-label="Resize terminal"></div>
+        <div class="resizer" id="resizer" role="separator" aria-orientation="horizontal" aria-label="Resize terminal" tabindex="0"></div>
         <div class="drawer-head">
           <div class="term-tabs" id="term-tabs"></div>
           <button class="btn ghost sm" id="btn-new-shell" title="New shell session">
@@ -138,7 +177,7 @@
           </button>
           <span class="spacer"></span>
           <span class="hint">⌃`</span>
-          <button class="icon-btn sm" id="btn-hide-term" title="Hide terminal" aria-label="Hide terminal"><svg viewBox="0 0 24 24"><path d="m6 9 6 6 6-6"/></svg></button>
+          <button class="icon-btn sm" id="btn-hide-term" title="Hide terminal" aria-label="Hide terminal"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="m6 9 6 6 6-6"/></svg></button>
         </div>
         <div class="term-stage" id="term-stage"></div>
       </div>
@@ -146,9 +185,59 @@
 
     <!-- ── command palette ─────────────────────────────────────────────── -->
     <dialog class="palette" id="palette" aria-label="Command palette">
-      <input id="palette-input" type="text" placeholder="Type a command…" autocomplete="off" spellcheck="false" />
+      <input id="palette-input" type="text" placeholder="Type a command…" autocomplete="off" spellcheck="false"
+             aria-describedby="palette-hint" />
       <ul id="palette-list" role="listbox"></ul>
+      <p class="palette-hint" id="palette-hint"><kbd>↑↓</kbd> navigate · <kbd>↵</kbd> run · <kbd>esc</kbd> close</p>
     </dialog>
+
+    <!-- ── system panel (anchored to the status pill) ──────────────────── -->
+    <div class="sys" id="sys-panel" popover aria-labelledby="sys-title">
+      <header class="sys-head">
+        <h2 id="sys-title">System</h2>
+      </header>
+      <dl class="sys-grid">
+        <dt>Workspace</dt>
+        <dd><span class="dot" id="sys-dot"></span> <span id="sys-web"></span></dd>
+        <dt>Address</dt>
+        <dd><a id="sys-url" target="_blank" rel="noopener noreferrer"></a></dd>
+        <dt>Folder</dt>
+        <dd class="mono" id="sys-root"></dd>
+        <dt>Terminals</dt>
+        <dd id="sys-terms"></dd>
+        <dt>Job window</dt>
+        <dd id="sys-job"></dd>
+      </dl>
+      <pre class="boot-log" id="sys-log" tabindex="0" aria-label="Recent server log"></pre>
+      <footer class="sys-actions">
+        <button class="btn sm" id="sys-copy">Copy folder path</button>
+        <button class="btn sm" id="sys-restart">Restart workspace</button>
+      </footer>
+    </div>
+
+    <!-- ── keyboard shortcuts ──────────────────────────────────────────── -->
+    <dialog class="sheet" id="shortcuts" aria-labelledby="sc-title">
+      <header class="sheet-head">
+        <h2 id="sc-title">Keyboard shortcuts</h2>
+        <form method="dialog"><button class="icon-btn sm" aria-label="Close"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6 6l12 12M18 6 6 18"/></svg></button></form>
+      </header>
+      <dl class="keys">
+        <dt><kbd>⌘</kbd><kbd>K</kbd></dt><dd>Command palette</dd>
+        <dt><kbd>⌘</kbd><kbd>1</kbd> / <kbd>2</kbd></dt><dd>Workspace / Jobs</dd>
+        <dt><kbd>⌃</kbd><kbd>`</kbd></dt><dd>Show or hide the terminal</dd>
+        <dt><kbd>⌘</kbd><kbd>L</kbd></dt><dd>Focus the job URL (Jobs)</dd>
+        <dt><kbd>/</kbd></dt><dd>Filter companies (Jobs)</dd>
+        <dt><kbd>↵</kbd></dt><dd>In the filter: open the first match</dd>
+        <dt><kbd>←</kbd><kbd>→</kbd></dt><dd>Move between tabs</dd>
+        <dt><kbd>Del</kbd></dt><dd>Close the focused terminal tab</dd>
+        <dt><kbd>↑</kbd><kbd>↓</kbd></dt><dd>Resize the terminal (on its top edge)</dd>
+        <dt><kbd>Esc</kbd></dt><dd>Close a dialog, or hide the terminal</dd>
+        <dt><kbd>?</kbd></dt><dd>This sheet</dd>
+      </dl>
+      <p class="meta">Shortcuts work while focus is in the studio. Inside the workspace, click the title bar first.</p>
+    </dialog>
+
+    <div class="toasts" id="toasts" role="status" aria-live="polite"></div>
 
     <script src="/vendor/xterm.js"></script>
     <script src="/vendor/addon-fit.js"></script>
